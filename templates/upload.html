@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Formant Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="card">
+    <h2>Upload Audio</h2>
+    <form method="POST" enctype="multipart/form-data">
+      <input type="file" name="audio" accept="audio/*" required><br><br>
+      <label>Select method:</label><br>
+      <input type="radio" name="method" value="raw" required> Raw Audio (Parselmouth)<br>
+      <input type="radio" name="method" value="image"> Image-Based (Contours)<br><br>
+      <button type="submit">Analyze</button>
+    </form>
+  </div>
+
+  {% if img_data %}
+    <div class="card">
+      <h2>{{ mode }} - Formant Spectrogram</h2>
+      <img src="data:image/png;base64,{{ img_data }}" width="100%">
+    </div>
+  {% endif %}
+
+  {% if bark_filter_img %}
+    <div class="card">
+      <h2>Bark Scale Filter Bank</h2>
+      <img src="data:image/png;base64,{{ bark_filter_img }}" width="100%">
+    </div>
+  {% endif %}
+
+  {% if dist %}
+    <div class="card">
+      <h2>Formant Distance Matrix</h2>
+      {{ dist|safe }}
+    </div>
+  {% endif %}
+
+  {% if time %}
+    <div class="card">
+      <h2>Formant Time Ranges</h2>
+      {{ time|safe }}
+    </div>
+  {% endif %}
+</body>
+</html>
