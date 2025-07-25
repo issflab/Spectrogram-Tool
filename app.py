@@ -1,6 +1,8 @@
 from flask import Flask, request, render_template
 from audio_utils import *
 import os
+import matplotlib
+matplotlib.use('Agg')
 
 app = Flask(__name__)
 UPLOAD_DIR = "uploads"

@@ -1,5 +1,6 @@
 import librosa
 import librosa.display
+import matplotlib
 import numpy as np
 import matplotlib.pyplot as plt
 import parselmouth
@@ -8,6 +9,7 @@ import matplotlib.cm as cm
 import pandas as pd
 import io
 import base64
+matplotlib.use('Agg')  # Use a non-interactive backend for matplotlib
 
 def extract_formants_raw(audio_path, max_formants=20):
     snd = parselmouth.Sound(audio_path)
