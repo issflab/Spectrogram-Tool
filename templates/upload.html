@@ -2,7 +2,7 @@
 <html>
 <head>
   <title>Formant Analyzer</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <div class="card">
@@ -11,7 +11,7 @@
       <input type="file" name="audio" accept="audio/*" required><br><br>
       <label>Select method:</label><br>
       <input type="radio" name="method" value="raw" required> Raw Audio (Parselmouth)<br>
-      <input type="radio" name="method" value="image"> Image-Based (Contours)<br><br>
+      <input type="radio" name="method" value="image" required> Image-Based (Contours)<br><br>
       <button type="submit">Analyze</button>
     </form>
   </div>
@@ -30,18 +30,156 @@
     </div>
   {% endif %}
 
-  {% if dist %}
+  {% if total_formants %}
+    <!-- Hidden data elements for JavaScript -->
+    <div id="data-container" style="display: none;">
+      <div id="distance-data">{{ dist_html|safe }}</div>
+      <div id="time-data">{{ time_html|safe }}</div>
+      <div id="total-formants">{{ total_formants }}</div>
+    </div>
+
     <div class="card">
+      <h2>Select Number of Formants to Display</h2>
+      <label for="formant-slider">
+        Number of Formants: <span id="formant-count">1</span> (Max: <span id="max-formants">{{ total_formants }}</span>)
+      </label>
+      <input type="range" id="formant-slider" min="1" max="{{ total_formants }}" value="1" class="slider">
+      <div class="slider-labels">
+        <span>1</span>
+        <span>{{ total_formants }}</span>
+      </div>
+      <button id="show-tables-btn" class="show-btn">Show Analysis Tables</button>
+    </div>
+
+    <!-- Hidden tables that will appear after user selects formant count -->
+    <div class="card" id="distance-matrix-card" style="display: none;">
       <h2>Formant Distance Matrix</h2>
-      {{ dist|safe }}
+      <div id="distance-matrix"></div>
+    </div>
+
+    <div class="card" id="time-ranges-card" style="display: none;">
+      <h2>Formant Time Ranges</h2>
+      <div id="time-ranges"></div>
     </div>
   {% endif %}
 
-  {% if time %}
-    <div class="card">
-      <h2>Formant Time Ranges</h2>
-      {{ time|safe }}
-    </div>
-  {% endif %}
+  <script>
+    // Pure JavaScript without Jinja2 template syntax
+    var originalDistanceData = null;
+    var originalTimeData = null;
+    var totalFormants = 0;
+
+    // Get data from hidden elements
+    function initializeData() {
+      const dataContainer = document.getElementById('data-container');
+      if (dataContainer) {
+        const distanceElement = document.getElementById('distance-data');
+        const timeElement = document.getElementById('time-data');
+        const totalElement = document.getElementById('total-formants');
+
+        if (distanceElement) {
+          originalDistanceData = distanceElement.innerHTML;
+        }
+        if (timeElement) {
+          originalTimeData = timeElement.innerHTML;
+        }
+        if (totalElement) {
+          totalFormants = parseInt(totalElement.textContent);
+        }
+      }
+    }
+
+    // Initialize data when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+      initializeData();
+    });
+
+    // Slider functionality
+    const slider = document.getElementById('formant-slider');
+    const countDisplay = document.getElementById('formant-count');
+    const showTablesBtn = document.getElementById('show-tables-btn');
+
+    if (slider) {
+      slider.addEventListener('input', function() {
+        const selectedCount = parseInt(this.value);
+        countDisplay.textContent = selectedCount;
+      });
+    }
+
+    // Show tables button functionality
+    if (showTablesBtn) {
+      showTablesBtn.addEventListener('click', function() {
+        const selectedCount = parseInt(slider.value);
+        
+        // Generate filtered tables
+        generateFilteredTables(selectedCount);
+        
+        // Show the table cards
+        document.getElementById('distance-matrix-card').style.display = 'block';
+        document.getElementById('time-ranges-card').style.display = 'block';
+        
+        // Change button text
+        this.textContent = 'Update Tables';
+      });
+    }
+
+    function generateFilteredTables(maxFormants) {
+      // Generate filtered distance matrix
+      if (originalDistanceData) {
+        generateFilteredDistanceMatrix(maxFormants);
+      }
+      
+      // Generate filtered time ranges
+      if (originalTimeData) {
+        generateFilteredTimeRanges(maxFormants);
+      }
+    }
+
+    function generateFilteredDistanceMatrix(maxFormants) {
+      const container = document.getElementById('distance-matrix');
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = originalDistanceData;
+      const table = tempDiv.querySelector('table');
+      
+      if (table) {
+        const rows = Array.from(table.querySelectorAll('tr'));
+        
+        // Keep only header + first maxFormants rows
+        for (let i = rows.length - 1; i > maxFormants; i--) {
+          if (rows[i]) rows[i].remove();
+        }
+        
+        // Keep only first maxFormants+1 columns (including header)
+        rows.forEach((row, rowIndex) => {
+          if (rowIndex <= maxFormants) {
+            const cells = Array.from(row.querySelectorAll('th, td'));
+            for (let j = cells.length - 1; j > maxFormants; j--) {
+              if (cells[j]) cells[j].remove();
+            }
+          }
+        });
+        
+        container.innerHTML = tempDiv.innerHTML;
+      }
+    }
+
+    function generateFilteredTimeRanges(maxFormants) {
+      const container = document.getElementById('time-ranges');
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = originalTimeData;
+      const table = tempDiv.querySelector('table');
+      
+      if (table) {
+        const rows = Array.from(table.querySelectorAll('tr'));
+        
+        // Keep header row + first maxFormants data rows
+        for (let i = rows.length - 1; i > maxFormants; i--) {
+          if (rows[i]) rows[i].remove();
+        }
+        
+        container.innerHTML = tempDiv.innerHTML;
+      }
+    }
+  </script>
 </body>
 </html>
