@@ -17,10 +17,10 @@
   </div>
 
   {% if img_data %}
-    <div class="card">
-      <h2>{{ mode }} - Formant Spectrogram</h2>
-      <img src="data:image/png;base64,{{ img_data }}" width="100%">
-    </div>
+  <div class="card">
+    <h2>{{ mode }} - Interactive Spectrogram</h2>
+    {{ img_data|safe }}
+  </div>
   {% endif %}
 
   {% if bark_filter_img %}

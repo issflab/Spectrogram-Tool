@@ -12,13 +12,24 @@ import base64
 matplotlib.use('Agg')  # Use a non-interactive backend for matplotlib
 
 def extract_formants_raw(audio_path, max_formants=20):
-    snd = parselmouth.Sound(audio_path)
+    import parselmouth
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    # Load full audio using soundfile
+    y, sr = sf.read(audio_path)
+    snd = parselmouth.Sound(values=y.T, sampling_frequency=sr)
+
+    # Pitch and Formants
     pitch = snd.to_pitch(time_step=0.01)
     formant = snd.to_formant_burg(time_step=0.01)
-    y, sr = librosa.load(audio_path, duration=5.0)
-    n_fft, hop_length = 2048, 256
-    S_db = librosa.amplitude_to_db(np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length)), ref=np.max)
 
+    # Spectrogram
+    n_fft, hop_length = 2048, 256
+    S_db = librosa.amplitude_to_db(np.abs(librosa.stft(y[:, 0] if y.ndim > 1 else y, n_fft=n_fft, hop_length=hop_length)), ref=np.max)
+
+    # Track F0 and formants
     times = pitch.xs()
     f0_track = []
     formant_tracks = [[] for _ in range(max_formants)]
@@ -33,7 +44,9 @@ def extract_formants_raw(audio_path, max_formants=20):
             except:
                 formant_tracks[i - 1].append(0.0)
 
+    print(f"S_db.shape = {S_db.shape}, times range = {times[0]} to {times[-1]}, duration = {len(y)/sr:.2f} sec")
     return times, f0_track, formant_tracks, S_db, sr, hop_length
+
 
 def extract_formants_image(audio_path, percentile=90, max_freq_range=500, min_len=20):
     y, sr = librosa.load(audio_path)
@@ -146,24 +159,26 @@ def plot_bark(S_db, sr, hop_length):
     plt.close()
     return base64.b64encode(buf.getvalue()).decode()
 
-def plot_bark_filterbank():
-    bark_edges = np.array([
-        20, 100, 200, 300, 400, 510, 630, 770, 920,
-        1080, 1270, 1480, 1720, 2000, 2320, 2700,
-        3150, 3700, 4400, 5300, 6400, 7700, 9500, 12000, 15500
-    ])
-    plt.figure(figsize=(8, 5))
-    for i in range(len(bark_edges) - 1):
-        left = bark_edges[i]
-        right = bark_edges[i+1]
-        center = (left + right) / 2
-        height = center / 100
-        plt.bar(i + 1, height, width=1, align='center', color='navy')
-    plt.yscale('log')
-    plt.ylabel("Frequency (Hz)")
-    plt.xlabel("Band")
-    plt.title("Bark Scale Filter Bank (Approximate)")
-    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+def plot_bark_scale_curve():
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import io
+    import base64
+
+    def hz_to_bark(f):
+        return 13 * np.arctan(0.00076 * f) + 3.5 * np.arctan((f / 7500) ** 2)
+
+    freqs = np.linspace(0, 16000, 512)
+    bark_values = hz_to_bark(freqs)
+
+    plt.figure(figsize=(8, 4))
+    plt.step(freqs, bark_values, color='black', linewidth=2)
+    plt.xlabel("Frequency (Hz)")
+    plt.ylabel("Bark Scale")
+    plt.title("Bark Scale Mapping")
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.tight_layout()
+
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
     plt.close()

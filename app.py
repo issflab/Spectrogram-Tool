@@ -2,6 +2,9 @@ from flask import Flask, request, render_template
 from audio_utils import *
 import os
 import matplotlib
+from plotly_utils import generate_interactive_raw_spectrogram, generate_interactive_image_spectrogram
+
+
 matplotlib.use('Agg')
 
 app = Flask(__name__)
@@ -21,7 +24,8 @@ def index():
 
         if method == "image":
             contours, S_db, sr, hop = extract_formants_image(path)
-            img_data = plot_spectrogram_with_formants(S_db, sr, hop, contours)
+            #img_data = plot_spectrogram_with_formants(S_db, sr, hop, contours)
+            img_data = generate_interactive_image_spectrogram(S_db, sr, hop, contours)
             dist_matrix = compute_frequency_distance_matrix(contours)
             time_df = compute_formant_time_ranges(contours)
             mode = "Image-Based"
@@ -29,14 +33,14 @@ def index():
 
         elif method == "raw":
             times, f0, tracks, S_db, sr, hop = extract_formants_raw(path)
-            img_data = plot_raw_spectrogram_with_tracks(S_db, sr, hop, times, f0, tracks)
+            #img_data = plot_raw_spectrogram_with_tracks(S_db, sr, hop, times, f0, tracks)
+            img_data = generate_interactive_raw_spectrogram(S_db, sr, hop, times, f0, tracks)
             dist_matrix = compute_raw_distance_matrix(tracks)
             time_df = compute_raw_time_ranges(times, tracks)
             mode = "Raw Audio"
-            # Count non-empty tracks
             total_formants = sum(1 for track in tracks if np.any(track))
 
-        bark_filter_img = plot_bark_filterbank()
+        bark_filter_img = plot_bark_scale_curve()
         
         # Convert dataframes to HTML strings
         if dist_matrix is not None:
