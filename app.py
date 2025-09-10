@@ -131,3 +131,11 @@ def download_csv():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+"""
+@echo off
+cd /d "%~dp0"
+start "" cmd /k python app.py
+start "" http://localhost:5000/
+
+"""
