@@ -1,60 +1,133 @@
-from flask import Flask, request, render_template
-from audio_utils import *
+# app.py
 import os
-import matplotlib
-from plotly_utils import generate_interactive_raw_spectrogram, generate_interactive_image_spectrogram
-
-
-matplotlib.use('Agg')
+import io
+import json
+import pandas as pd
+from flask import Flask, request, render_template, send_file, jsonify
+from audio_utils import (
+    register_file, resolve_file,
+    extract_formants_raw, extract_formants_image,
+    compute_bark_energy, BARK_EDGES,
+    compute_frequency_distance_matrix, compute_formant_time_ranges,
+    compute_raw_distance_matrix, compute_raw_time_ranges,
+)
 
 app = Flask(__name__)
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET"])
 def index():
-    img_data = dist_matrix = time_df = mode = bark_filter_img = total_formants = None
-    dist_html = time_html = ""
+    return render_template("index.html")
 
-    if request.method == "POST":
-        file = request.files["audio"]
-        method = request.form["method"]
-        path = os.path.join(UPLOAD_DIR, file.filename)
-        file.save(path)
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    """
+    Multipart with: file, method, and optional params
+    OR JSON with: file_id, method, params
+    """
+    method = None
+    params = {}
+    path = None
+    file_id = None
 
-        if method == "image":
-            contours, S_db, sr, hop = extract_formants_image(path)
-            #img_data = plot_spectrogram_with_formants(S_db, sr, hop, contours)
-            img_data = generate_interactive_image_spectrogram(S_db, sr, hop, contours)
-            dist_matrix = compute_frequency_distance_matrix(contours)
-            time_df = compute_formant_time_ranges(contours)
-            mode = "Image-Based"
-            total_formants = len(contours)
+    if request.content_type and "multipart/form-data" in request.content_type:
+        method = request.form.get("method", "raw")
+        params_json = request.form.get("params")
+        if params_json:
+            params = json.loads(params_json)
+        f = request.files["file"]
+        path = os.path.join(UPLOAD_DIR, f.filename)
+        f.save(path)
+        file_id = register_file(path)
+    else:
+        payload = request.get_json(force=True)
+        method = payload.get("method", "raw")
+        params = payload.get("params", {})
+        file_id = payload.get("file_id")
+        path = resolve_file(file_id)
+        if not path:
+            return jsonify({"error": "file_id not found"}), 400
 
-        elif method == "raw":
-            times, f0, tracks, S_db, sr, hop = extract_formants_raw(path)
-            #img_data = plot_raw_spectrogram_with_tracks(S_db, sr, hop, times, f0, tracks)
-            img_data = generate_interactive_raw_spectrogram(S_db, sr, hop, times, f0, tracks)
-            dist_matrix = compute_raw_distance_matrix(tracks)
-            time_df = compute_raw_time_ranges(times, tracks)
-            mode = "Raw Audio"
-            total_formants = sum(1 for track in tracks if np.any(track))
+    denoise = bool(params.get("denoise", False))
 
-        bark_filter_img = plot_bark_scale_curve()
-        
-        # Convert dataframes to HTML strings
-        if dist_matrix is not None:
-            dist_html = dist_matrix.to_html()
-        if time_df is not None:
-            time_html = time_df.to_html()
+    if method == "image":
+        percentile = float(params.get("percentile", 90))
+        max_freq_range = float(params.get("max_freq_range", 500))
+        min_len = int(params.get("min_len", 20))
+        res = extract_formants_image(path, percentile, max_freq_range, min_len, denoise=denoise)
 
-    return render_template("upload.html",
-                           img_data=img_data,
-                           dist_html=dist_html,
-                           time_html=time_html,
-                           mode=mode,
-                           bark_filter_img=bark_filter_img,
-                           total_formants=total_formants)
+        dist_df = compute_frequency_distance_matrix(res["contours"])
+        time_df = compute_formant_time_ranges(res["contours"])
+
+        S_db = res["S_db"]
+        n_fft = (S_db.shape[0] - 1) * 2
+        bark_energy = compute_bark_energy(S_db, res["sr"], n_fft)
+
+        return jsonify({
+            "file_id": file_id,
+            "mode": "Image-Based",
+            "denoised": denoise,
+            "sr": res["sr"],
+            "time": res["tvals"].tolist(),
+            "freq": res["fvals"].tolist(),
+            "S_db": res["S_db"].tolist(),
+            "contours": res["contours"],
+            "bark": {
+                "edges": BARK_EDGES.tolist(),
+                "energy": bark_energy
+            },
+            "tables": {
+                "distance_csv": dist_df.to_csv(index=True),
+                "time_csv": time_df.to_csv(index=False)
+            }
+        })
+
+    else:
+        max_formants = int(params.get("max_formants", 20))
+        dur_limit_sec = float(params.get("dur_limit_sec", 5.0))
+        res = extract_formants_raw(path, max_formants=max_formants, dur_limit_sec=dur_limit_sec, denoise=denoise)
+
+        dist_df = compute_raw_distance_matrix(res["formants"])
+        time_df = compute_raw_time_ranges(res["times"], res["formants"])
+
+        S_db = res["S_db"]
+        n_fft = (S_db.shape[0] - 1) * 2
+        bark_energy = compute_bark_energy(S_db, res["sr"], n_fft)
+
+        tracks = []
+        for i, tr in enumerate(res["formants"]):
+            tracks.append({"name": f"F{i+1}", "time": res["times"].tolist(), "freq": tr.tolist()})
+        f0 = {"name": "F0", "time": res["times"].tolist(), "freq": res["f0"].tolist()}
+
+        return jsonify({
+            "file_id": file_id,
+            "mode": "Raw Audio",
+            "denoised": denoise,
+            "sr": res["sr"],
+            "time": res["tvals"].tolist(),
+            "freq": res["fvals"].tolist(),
+            "S_db": res["S_db"].tolist(),
+            "f0": f0,
+            "formants": tracks,
+            "bark": {
+                "edges": BARK_EDGES.tolist(),
+                "energy": bark_energy
+            },
+            "tables": {
+                "distance_csv": dist_df.to_csv(index=True),
+                "time_csv": time_df.to_csv(index=False)
+            }
+        })
+
+@app.route("/download/csv", methods=["POST"])
+def download_csv():
+    data = request.get_json(force=True)
+    csv_text = data.get("csv", "")
+    filename = data.get("filename", "table.csv")
+    buf = io.BytesIO(csv_text.encode("utf-8"))
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=filename, mimetype="text/csv")
 
 if __name__ == "__main__":
     app.run(debug=True)

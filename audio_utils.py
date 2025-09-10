@@ -1,185 +1,239 @@
+# audio_utils.py
+import os
+import io
+import uuid
+import base64
+import numpy as np
+import pandas as pd
 import librosa
 import librosa.display
-import matplotlib
-import numpy as np
-import matplotlib.pyplot as plt
 import parselmouth
 from skimage import measure
-import matplotlib.cm as cm
-import pandas as pd
-import io
-import base64
-matplotlib.use('Agg')  # Use a non-interactive backend for matplotlib
+import soundfile as sf
 
-def extract_formants_raw(audio_path, max_formants=20):
-    import parselmouth
-    import librosa
-    import numpy as np
-    import soundfile as sf
+# ---------------------------
+# Registry for uploaded files
+# ---------------------------
+FILE_REGISTRY = {}  # file_id -> absolute path
 
-    # Load full audio using soundfile
-    y, sr = sf.read(audio_path)
-    snd = parselmouth.Sound(values=y.T, sampling_frequency=sr)
+def register_file(path: str) -> str:
+    fid = str(uuid.uuid4())
+    FILE_REGISTRY[fid] = path
+    return fid
 
-    # Pitch and Formants
+def resolve_file(file_id: str) -> str:
+    return FILE_REGISTRY.get(file_id)
+
+# ---------------------------
+# Core DSP helpers
+# ---------------------------
+def compute_spectrogram(y, sr, n_fft=2048, hop_length=256, clip_min_db=-80):
+    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
+    S_db = librosa.amplitude_to_db(S, ref=np.max)
+    S_db = np.clip(S_db, clip_min_db, 0)
+    time_vals = librosa.frames_to_time(np.arange(S_db.shape[1]), sr=sr, hop_length=hop_length)
+    freq_vals = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    return S_db, time_vals, freq_vals, hop_length
+
+def denoise_spectral_subtract(
+    y, sr, noise_duration=0.5, n_fft=2048, hop_length=256, oversub=1.0, floor_db=-80.0
+):
+    """
+    Very simple spectral subtraction:
+    1) Estimate noise magnitude from the first `noise_duration` seconds,
+    2) Subtract it from each frame (with oversub),
+    3) Clamp to a floor in dB,
+    4) Rebuild with original phase and iSTFT.
+    """
+    if len(y) < int(noise_duration * sr):
+        noise_duration = max(0.1, len(y) / sr)
+
+    Y = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
+    mag, phase = np.abs(Y), np.angle(Y)
+
+    n_frames = max(1, int((noise_duration * sr) / hop_length))
+    noise_mag = np.median(mag[:, :n_frames], axis=1, keepdims=True)
+
+    clean_mag = np.maximum(mag - oversub * noise_mag, 0.0)
+
+    mag_db = librosa.amplitude_to_db(clean_mag + 1e-10, ref=np.max)
+    mag_db = np.clip(mag_db, a_min=floor_db, a_max=0.0)
+    clean_mag = librosa.db_to_amplitude(mag_db, ref=1.0) * np.max(clean_mag + 1e-10)
+
+    Y_clean = clean_mag * np.exp(1j * phase)
+    y_hat = librosa.istft(Y_clean, hop_length=hop_length, length=len(y))
+    return y_hat
+
+# ---------------------------
+# RAW (Parselmouth) pipeline
+# ---------------------------
+def extract_formants_raw(audio_path, max_formants=20, dur_limit_sec=5.0, denoise=False):
+    """
+    Extracts F0 and formants using Parselmouth (Burg) and computes a spectrogram.
+    If denoise=True, a temporary denoised WAV is created for analysis.
+    """
+    tmp_path = None
+    use_path = audio_path
+
+    if denoise:
+        y_full, sr_full = librosa.load(audio_path, sr=None)
+        y_full = denoise_spectral_subtract(y_full, sr_full)
+        tmp_path = f"/tmp/{uuid.uuid4()}.wav"
+        sf.write(tmp_path, y_full, sr_full)
+        use_path = tmp_path
+
+    snd = parselmouth.Sound(use_path)
     pitch = snd.to_pitch(time_step=0.01)
     formant = snd.to_formant_burg(time_step=0.01)
 
-    # Spectrogram
-    n_fft, hop_length = 2048, 256
-    S_db = librosa.amplitude_to_db(np.abs(librosa.stft(y[:, 0] if y.ndim > 1 else y, n_fft=n_fft, hop_length=hop_length)), ref=np.max)
+    y, sr = librosa.load(use_path, duration=dur_limit_sec)
+    S_db, tvals, fvals, hop = compute_spectrogram(y, sr)
 
-    # Track F0 and formants
     times = pitch.xs()
     f0_track = []
     formant_tracks = [[] for _ in range(max_formants)]
 
     for t in times:
         f0 = pitch.get_value_at_time(t)
-        f0_track.append(f0 if f0 else 0.0)
+        f0_track.append(float(f0) if f0 else 0.0)
         for i in range(1, max_formants + 1):
             try:
                 f = formant.get_value_at_time(i, t)
-                formant_tracks[i - 1].append(f if f is not None else 0.0)
+                formant_tracks[i - 1].append(float(f) if f is not None else 0.0)
             except:
                 formant_tracks[i - 1].append(0.0)
 
-    print(f"S_db.shape = {S_db.shape}, times range = {times[0]} to {times[-1]}, duration = {len(y)/sr:.2f} sec")
-    return times, f0_track, formant_tracks, S_db, sr, hop_length
+    if tmp_path and os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except:
+            pass
 
+    return {
+        "S_db": S_db,
+        "sr": sr,
+        "hop_length": hop,
+        "times": np.array(times, dtype=float),
+        "f0": np.array(f0_track, dtype=float),
+        "formants": [np.array(tr, dtype=float) for tr in formant_tracks],
+        "tvals": tvals,
+        "fvals": fvals,
+    }
 
-def extract_formants_image(audio_path, percentile=90, max_freq_range=500, min_len=20):
+# ---------------------------
+# IMAGE (Contours) pipeline
+# ---------------------------
+def extract_formants_image(audio_path, percentile=90, max_freq_range=500, min_len=20, denoise=False):
     y, sr = librosa.load(audio_path)
-    n_fft, hop_length = 2048, 256
-    S = np.abs(librosa.stft(y, n_fft=n_fft, hop_length=hop_length))
-    S_db = librosa.amplitude_to_db(S, ref=np.max)
-    S_db = np.clip(S_db, -80, 0)
+    if denoise:
+        y = denoise_spectral_subtract(y, sr)
+    S_db, time_vals, freq_vals, hop_length = compute_spectrogram(y, sr)
 
+    # threshold per frequency row
     thresh = np.percentile(S_db, percentile, axis=1, keepdims=True)
     S_bin = S_db > thresh
-    contours = measure.find_contours(S_bin, 0.5)
 
-    time_vals = librosa.frames_to_time(np.arange(S_db.shape[1]), sr=sr, hop_length=hop_length)
-    freq_vals = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-    horizontal_contours = []
+    # find contours in the binary mask
+    contours = measure.find_contours(S_bin, 0.5)
+    results = []
     for contour in contours:
         x_pix, y_pix = contour[:, 1], contour[:, 0]
         x_time = np.interp(x_pix, np.arange(S_db.shape[1]), time_vals)
         y_freq = np.interp(y_pix, np.arange(S_db.shape[0]), freq_vals)
         if len(x_time) > min_len:
-            freq_range = np.max(y_freq) - np.min(y_freq)
-            if freq_range < max_freq_range:
-                horizontal_contours.append((np.median(y_freq), x_time, y_freq))
-    horizontal_contours.sort(key=lambda tup: tup[0])
-    return horizontal_contours, S_db, sr, hop_length
+            freq_range = float(np.max(y_freq) - np.min(y_freq))
+            if freq_range < float(max_freq_range):
+                results.append((float(np.median(y_freq)), x_time, y_freq))
+
+    # sort by median frequency
+    results.sort(key=lambda tup: tup[0])
+
+    contours_json = []
+    for i, (_, tx, fy) in enumerate(results):
+        contours_json.append({
+            "name": f"F{i}",
+            "time": tx.astype(float).tolist(),
+            "freq": fy.astype(float).tolist()
+        })
+
+    return {
+        "S_db": S_db,
+        "sr": sr,
+        "hop_length": hop_length,
+        "tvals": time_vals,
+        "fvals": freq_vals,
+        "contours": contours_json
+    }
+
+# ---------------------------
+# Bark utilities
+# ---------------------------
+BARK_EDGES = np.array([
+    20, 100, 200, 300, 400, 510, 630, 770, 920,
+    1080, 1270, 1480, 1720, 2000, 2320, 2700,
+    3150, 3700, 4400, 5300, 6400, 7700, 9500, 12000, 15500
+], dtype=float)
+
+def compute_bark_energy(S_db, sr, n_fft):
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    energies = []
+    for i in range(len(BARK_EDGES) - 1):
+        fmin, fmax = BARK_EDGES[i], BARK_EDGES[i+1]
+        band_idx = np.where((freqs >= fmin) & (freqs < fmax))[0]
+        if band_idx.size == 0:
+            energies.append(0.0)
+        else:
+            energies.append(float(S_db[band_idx, :].mean()))
+    return energies
+
+# ---------------------------
+# Tables & exports (robust)
+# ---------------------------
+def _safe_median_positive(arr) -> float:
+    """Median of strictly-positive values; returns 0.0 if none."""
+    a = np.asarray(arr, dtype=float)
+    pos = a[a > 0]
+    return float(np.median(pos)) if pos.size else 0.0
 
 def compute_frequency_distance_matrix(contours):
-    names = [f"F{i}" for i in range(len(contours))]
-    means = [np.median(yf) for (_, _, yf) in contours]
-    return pd.DataFrame([[round(abs(a - b), 2) if i != j else 0
-                          for j, b in enumerate(means)] for i, a in enumerate(means)],
-                        index=names, columns=names)
+    names = [c["name"] for c in contours]
+    means = [np.median(np.array(c["freq"])) for c in contours] if contours else []
+    mat = [
+        [round(abs(a - b), 2) if i != j else 0 for j, b in enumerate(means)]
+        for i, a in enumerate(means)
+    ]
+    return pd.DataFrame(mat, index=names, columns=names)
 
 def compute_formant_time_ranges(contours):
-    return pd.DataFrame([(f"F{i}", round(np.min(t), 2), round(np.max(t), 2), round(np.max(t) - np.min(t), 2))
-                         for i, (_, t, _) in enumerate(contours)],
-                        columns=["Formant", "Start Time (s)", "End Time (s)", "Duration (s)"])
-
-def plot_spectrogram_with_formants(S_db, sr, hop_length, contours):
-    plt.figure(figsize=(14, 6))
-    librosa.display.specshow(S_db, sr=sr, hop_length=hop_length, x_axis='time', y_axis='hz', cmap='inferno')
-    cmap = cm.get_cmap('tab10', len(contours))
-    for i, (_, x, y) in enumerate(contours):
-        plt.plot(x, y, color=cmap(i), linewidth=1.5, label=f"F{i}")
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    return base64.b64encode(buf.getvalue()).decode()
-
-def plot_raw_spectrogram_with_tracks(S_db, sr, hop_length, times, f0, formants):
-    plt.figure(figsize=(14, 6))
-    librosa.display.specshow(S_db, sr=sr, hop_length=hop_length, x_axis='time', y_axis='hz', cmap='magma')
-    plt.plot(times, f0, color='cyan', label='F0')
-    cmap = cm.get_cmap('viridis', len(formants))
-    for i, ftrack in enumerate(formants):
-        if np.any(ftrack):
-            plt.plot(times, ftrack, color=cmap(i), label=f"F{i+1}")
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    return base64.b64encode(buf.getvalue()).decode()
+    rows = []
+    for c in contours:
+        t = np.array(c["time"])
+        rows.append([c["name"], round(t.min(), 2), round(t.max(), 2), round(t.max()-t.min(), 2)])
+    return pd.DataFrame(rows, columns=["Formant", "Start Time (s)", "End Time (s)", "Duration (s)"])
 
 def compute_raw_distance_matrix(tracks):
-    med = [np.median([v for v in t if v > 0]) if np.any(t) else 0 for t in tracks]
-    return pd.DataFrame([[round(abs(a - b), 2) if i != j else 0
-                          for j, b in enumerate(med)] for i, a in enumerate(med)],
-                        index=[f"F{i+1}" for i in range(len(med))],
-                        columns=[f"F{i+1}" for i in range(len(med))])
+    """
+    tracks: list of 1D arrays/lists (per-formant frequency over time).
+    Uses median over strictly-positive samples; returns 0.0 if none.
+    """
+    med = [_safe_median_positive(t) for t in tracks]
+    idx = [f"F{i+1}" for i in range(len(med))]
+    mat = [
+        [round(abs(a - b), 2) if i != j else 0 for j, b in enumerate(med)]
+        for i, a in enumerate(med)
+    ]
+    return pd.DataFrame(mat, index=idx, columns=idx)
 
 def compute_raw_time_ranges(times, tracks):
+    """
+    Time ranges only for tracks that have any strictly-positive samples.
+    """
     data = []
-    for i, t in enumerate(tracks):
-        nz = np.where(np.array(t) > 0)[0]
+    tarr = np.array(times, dtype=float)
+    for i, tr in enumerate(tracks):
+        tr = np.asarray(tr, dtype=float)
+        nz = np.where(tr > 0)[0]
         if nz.size:
-            st, et = times[nz[0]], times[nz[-1]]
-            data.append((f"F{i+1}", round(st, 2), round(et, 2), round(et - st, 2)))
+            st, et = tarr[nz[0]], tarr[nz[-1]]
+            data.append([f"F{i+1}", round(st, 2), round(et, 2), round(et - st, 2)])
     return pd.DataFrame(data, columns=["Formant", "Start Time (s)", "End Time (s)", "Duration (s)"])
-
-def plot_bark(S_db, sr, hop_length):
-    # Approximate Bark band edges (24 critical bands)
-    bark_edges = np.array([
-        20, 100, 200, 300, 400, 510, 630, 770, 920,
-        1080, 1270, 1480, 1720, 2000, 2320, 2700,
-        3150, 3700, 4400, 5300, 6400, 7700, 9500, 12000, 15500
-    ])
-    n_fft = (S_db.shape[0] - 1) * 2
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
-
-    bark_energy = []
-    for i in range(len(bark_edges) - 1):
-        fmin, fmax = bark_edges[i], bark_edges[i+1]
-        band_idx = np.where((freqs >= fmin) & (freqs < fmax))[0]
-        if len(band_idx) == 0:
-            bark_energy.append(0)
-        else:
-            band_power = S_db[band_idx, :].mean()
-            bark_energy.append(band_power)
-
-    plt.figure(figsize=(10, 3))
-    plt.bar(range(1, len(bark_energy) + 1), bark_energy)
-    plt.title("Bark Band Energy")
-    plt.xlabel("Bark Band")
-    plt.ylabel("Avg dB")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    return base64.b64encode(buf.getvalue()).decode()
-
-def plot_bark_scale_curve():
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import io
-    import base64
-
-    def hz_to_bark(f):
-        return 13 * np.arctan(0.00076 * f) + 3.5 * np.arctan((f / 7500) ** 2)
-
-    freqs = np.linspace(0, 16000, 512)
-    bark_values = hz_to_bark(freqs)
-
-    plt.figure(figsize=(8, 4))
-    plt.step(freqs, bark_values, color='black', linewidth=2)
-    plt.xlabel("Frequency (Hz)")
-    plt.ylabel("Bark Scale")
-    plt.title("Bark Scale Mapping")
-    plt.grid(True, linestyle='--', alpha=0.4)
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    return base64.b64encode(buf.getvalue()).decode()
