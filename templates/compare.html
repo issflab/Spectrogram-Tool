@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Spectrogram Comparator</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .nav { display:flex; align-items:center; gap:8px; margin-left:auto; }
+    .nav a { text-decoration:none; }
+    .btn.navlink {
+      background:#111827; border:1px solid #374151; color:#e6edf3;
+      padding:8px 12px; border-radius:10px; font-weight:600;
+    }
+    .btn.navlink.active { border-color:#6ae3ff; box-shadow:0 0 0 2px rgba(106,227,255,.15) inset; }
+    .brand { display:flex; align-items:center; gap:8px; }
+    .brand .tag { margin-left:4px; font-size:.85em; opacity:.8; }
+
+    .main { padding:16px; display:flex; flex-direction:column; gap:12px; }
+    .viewer-container { display:flex; gap:12px; min-height:60vh; }
+    .viewer-container.row { flex-direction:row; }
+    .viewer-container.column { flex-direction:column; }
+    .pane { flex:1; background:#0f172a; border:1px solid #1f2a44; border-radius:12px; padding:8px; display:flex; flex-direction:column; }
+    .pane-title { font-weight:600; opacity:0.9; margin-bottom:8px; }
+    .spec-canvas { width:100%; height:100%; flex:1; border-radius:8px; background:#000; }
+    .timeline { display:flex; align-items:center; gap:12px; }
+    input[type="range"] { width:100%; }
+    button, select { background:#111827; color:#e6edf3; border:1px solid #374151; padding:8px 10px; border-radius:8px; }
+    @media (max-width: 720px) { .readout { display:none; } }
+  </style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Formant Analyzer <span class="tag">enhanced</span></div>
+  <div class="readout" aria-hidden="true" style="opacity:.7">
+    <span>Comparator</span>
+  </div>
+
+  <!-- Shared menu -->
+  <nav class="nav" aria-label="Primary">
+    <a class="btn navlink" href="/">Analyzer</a>
+    <a class="btn navlink" href="/compare">Spectrogram Comparator</a>
+  </nav>
+</header>
+
+<!-- Note: id="mainLayout" and ARIA attrs match main page for consistent a11y -->
+<main class="main" id="mainLayout" aria-busy="false" aria-live="polite">
+  <div class="controls" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+    <form id="uploadForm" enctype="multipart/form-data" style="display:flex; gap:10px; align-items:center;">
+      <input type="file" id="fileInput" name="file" accept=".wav,.mp3,.flac,.ogg,.m4a" required/>
+      <button type="submit" id="uploadBtn" class="btn primary">Upload</button>
+    </form>
+
+    <label>Layout:
+      <select id="layoutSelect">
+        <option value="side">Side-by-side</option>
+        <option value="stack">Stacked</option>
+      </select>
+    </label>
+
+    <button id="resetBtn" type="button" class="btn">Reset zoom</button>
+  </div>
+
+  <div class="viewer-container row" id="viewerContainer">
+    <div class="pane"><div class="pane-title">Unclean</div><canvas id="canvasLeft" class="spec-canvas"></canvas></div>
+    <div class="pane"><div class="pane-title">Clean</div><canvas id="canvasRight" class="spec-canvas"></canvas></div>
+  </div>
+
+  <div class="timeline">
+    <input id="timeSlider" type="range" min="0" max="100" value="0"/>
+    <div class="timestamp" id="timestamp">-- : --</div>
+  </div>
+
+  <div class="audioplayer"><audio id="audioPlayer" controls></audio></div>
+</main>
+
+<!-- Loader Overlay (same markup/classes as main page) -->
+<div id="loaderOverlay" class="loader hidden" role="status" aria-live="assertive" aria-label="Analyzing…">
+  <div class="spinner" aria-hidden="true"></div>
+  <div class="loader-text">Analyzing…</div>
+</div>
+
+<script>
+  // Highlight active menu item
+  (function() {
+    const path = location.pathname || "/";
+    document.querySelectorAll('.nav .navlink').forEach(a => {
+      if ((a.getAttribute('href') === "/" && path === "/") ||
+          (a.getAttribute('href') !== "/" && path.startsWith(a.getAttribute('href')))) {
+        a.classList.add('active');
+      }
+    });
+  })();
+</script>
+<script src="/static/compare.js"></script>
+</body>
+</html>

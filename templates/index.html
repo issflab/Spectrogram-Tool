@@ -6,6 +6,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link href="/static/style.css" rel="stylesheet">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    /* Minimal nav styles that piggyback on your theme */
+    .nav { display:flex; align-items:center; gap:8px; margin-left:auto; }
+    .nav a { text-decoration:none; }
+    .btn.navlink {
+      background:#111827; border:1px solid #374151; color:#e6edf3;
+      padding:8px 12px; border-radius:10px; font-weight:600;
+    }
+    .btn.navlink.active { border-color:#6ae3ff; box-shadow:0 0 0 2px rgba(106,227,255,.15) inset; }
+    .brand { display:flex; align-items:center; gap:8px; }
+    .brand .tag { margin-left:4px; font-size:.85em; opacity:.8; }
+    @media (max-width: 720px) {
+      .readout { display:none; }
+    }
+  </style>
 </head>
 <body>
   <header class="topbar">
@@ -15,6 +30,15 @@
       <span>Freq: <strong id="ro-freq">–</strong> Hz</span>
       <span>Level: <strong id="ro-level">–</strong> dB</span>
     </div>
+
+    <!-- Shared menu -->
+    <nav class="nav" aria-label="Primary">
+      <a class="btn navlink" href="/">Analyzer</a>
+      <a class="btn navlink" href="/compare">Spectrogram Comparator</a>
+      <!-- Add more entries if you like:
+      <a class="btn navlink" href="/about">About</a>
+      -->
+    </nav>
   </header>
 
   <main class="layout" id="mainLayout" aria-busy="false" aria-live="polite">
@@ -30,10 +54,14 @@
               <option value="image">Image-Based (Contours)</option>
             </select>
           </div>
+            <div class="row">
+              <label><input type="checkbox" id="denoiseChk"> Remove background noise (beta)</label>
+              <!-- NEW: ML cleaner checkbox -->
+              <label style="margin-left:10px;">
+                <input type="checkbox" id="mlCleanChk"> ML Clean (hybrid)
+              </label>
+            </div>
 
-          <div class="row">
-            <label><input type="checkbox" id="denoiseChk"> Remove background noise (beta)</label>
-          </div>
 
           <div id="rawParams" class="params">
             <label>Max formants</label>
@@ -61,6 +89,7 @@
         <div class="row">
           <label>Colormap</label>
           <select id="cmap">
+            <option value="NeonGreen">NeonGreen</option>
             <option value="Inferno">Inferno</option>
             <option value="Magma">Magma</option>
             <option value="Viridis">Viridis</option>
@@ -146,6 +175,18 @@
     <small>Inspired by SpectraLayers 10 features—hover readouts, zoom/pan, overlays.</small>
   </footer>
 
+  <script>
+    // Highlight active menu item
+    (function() {
+      const path = location.pathname || "/";
+      document.querySelectorAll('.nav .navlink').forEach(a => {
+        if ((a.getAttribute('href') === "/" && path === "/") ||
+            (a.getAttribute('href') !== "/" && path.startsWith(a.getAttribute('href')))) {
+          a.classList.add('active');
+        }
+      });
+    })();
+  </script>
   <script src="/static/app.js"></script>
 </body>
 </html>

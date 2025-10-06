@@ -70,25 +70,36 @@ def denoise_spectral_subtract(
 def extract_formants_raw(audio_path, max_formants=20, dur_limit_sec=5.0, denoise=False):
     """
     Extracts F0 and formants using Parselmouth (Burg) and computes a spectrogram.
-    If denoise=True, a temporary denoised WAV is created for analysis.
+    If denoise=True, denoise is done in-memory; NO temp files are written.
     """
-    tmp_path = None
-    use_path = audio_path
+    # 1) Load full audio at native SR
+    y_full, sr_full = librosa.load(audio_path, sr=None, mono=True)
 
-    if denoise:
-        y_full, sr_full = librosa.load(audio_path, sr=None)
-        y_full = denoise_spectral_subtract(y_full, sr_full)
-        tmp_path = f"/tmp/{uuid.uuid4()}.wav"
-        sf.write(tmp_path, y_full, sr_full)
-        use_path = tmp_path
+    # 2) Optional in-memory denoise
+    y_proc = denoise_spectral_subtract(y_full, sr_full) if denoise else y_full
 
-    snd = parselmouth.Sound(use_path)
-    pitch = snd.to_pitch(time_step=0.01)
-    formant = snd.to_formant_burg(time_step=0.01)
+    # 3) Build Parselmouth Sound directly from array (no temp WAV)
+    # Parselmouth expects float64; ensure dtype and pass sampling frequency
+    snd = parselmouth.Sound(y_proc.astype(np.float64), sampling_frequency=sr_full)
 
-    y, sr = librosa.load(use_path, duration=dur_limit_sec)
-    S_db, tvals, fvals, hop = compute_spectrogram(y, sr)
+    # 4) Limit analysis window to dur_limit_sec (if shorter, use full)
+    total_dur = snd.get_total_duration()
+    window_end = dur_limit_sec if dur_limit_sec > 0 else total_dur
+    window_end = min(window_end, total_dur)
+    if window_end < total_dur:
+        snd_win = snd.extract_part(from_time=0.0, to_time=window_end, preserve_times=True)
+    else:
+        snd_win = snd
 
+    # 5) Parselmouth pitch/formants on the same window
+    pitch = snd_win.to_pitch(time_step=0.01)
+    formant = snd_win.to_formant_burg(time_step=0.01)
+
+    # 6) Spectrogram on the same window using the processed audio
+    y_seg = y_proc[: int(window_end * sr_full)] if window_end > 0 else y_proc
+    S_db, tvals, fvals, hop = compute_spectrogram(y_seg, sr_full)
+
+    # 7) Collect tracks
     times = pitch.xs()
     f0_track = []
     formant_tracks = [[] for _ in range(max_formants)]
@@ -100,18 +111,12 @@ def extract_formants_raw(audio_path, max_formants=20, dur_limit_sec=5.0, denoise
             try:
                 f = formant.get_value_at_time(i, t)
                 formant_tracks[i - 1].append(float(f) if f is not None else 0.0)
-            except:
+            except Exception:
                 formant_tracks[i - 1].append(0.0)
-
-    if tmp_path and os.path.exists(tmp_path):
-        try:
-            os.remove(tmp_path)
-        except:
-            pass
 
     return {
         "S_db": S_db,
-        "sr": sr,
+        "sr": sr_full,
         "hop_length": hop,
         "times": np.array(times, dtype=float),
         "f0": np.array(f0_track, dtype=float),
@@ -119,6 +124,7 @@ def extract_formants_raw(audio_path, max_formants=20, dur_limit_sec=5.0, denoise
         "tvals": tvals,
         "fvals": fvals,
     }
+
 
 # ---------------------------
 # IMAGE (Contours) pipeline
