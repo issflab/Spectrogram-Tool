@@ -409,7 +409,7 @@ def _process_file_for_compare(file_path: Path):
         "audio_url": f"/uploads/{file_path.name}",
     }
 
-# ---- serve uploaded audio used by comparator player ----
+# ---- serve uploaded audio used by comparator/overlay player ----
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
     return send_from_directory(UPLOAD_DIR, filename)
@@ -438,16 +438,95 @@ def compare_upload():
         return jsonify({"error": str(e)}), 500
 
 
+# ===================================================================
+# NEW: Spectrogram Overlay (two audios → two grayscale specs to overlay)
+# ===================================================================
+# ===================================================================
+# UPDATED: Spectrogram Overlay (true colored spectrograms, not tinted)
+# ===================================================================
+
+def _custom_colormap(color):
+    """Return a BGR LUT based on a hex color string (e.g. '#00ff88')."""
+    color = color.lstrip("#")
+    r, g, b = tuple(int(color[i:i+2], 16) for i in (0, 2, 4))
+    lut = np.zeros((256, 1, 3), dtype=np.uint8)
+    for i in range(256):
+        factor = i / 255.0
+        lut[i, 0] = (int(b * factor), int(g * factor), int(r * factor))
+    return lut
+
+def _save_spectrogram_colored(path_in: Path, save_path: Path, color_hex="#00ff88", duration=None):
+    y, sr = _load_audio_resampled(path_in, target_sr=SAMPLE_RATE, duration=duration)
+    D = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH))
+    S = librosa.amplitude_to_db(D, ref=np.max)
+    S_norm = cv2.normalize(S, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    S_norm = cv2.flip(S_norm, 0)
+    S_bgr = cv2.cvtColor(S_norm, cv2.COLOR_GRAY2BGR)
+    lut = _custom_colormap(color_hex)
+    S_colored = cv2.LUT(S_bgr, lut)
+    cv2.imwrite(str(save_path), S_colored)
+
+
+def _process_overlay_pair(ref_path: Path, sec_path: Path, ref_color="#00ff88", sec_color="#ff4dd2"):
+    """
+    Generates two true-colored spectrograms using comparator parameters and per-file colors.
+    """
+    base = uuid.uuid4().hex[:6]
+    out_ref = SPEC_DIR / f"{ref_path.stem}_{base}_ref.png"
+    out_sec = SPEC_DIR / f"{sec_path.stem}_{base}_sec.png"
+
+    _save_spectrogram_colored(ref_path, out_ref, ref_color)  # server-side colored
+    _save_spectrogram_colored(sec_path, out_sec, sec_color)
+
+    ref_png = cv2.imread(str(out_ref))
+    h, w = ref_png.shape[:2]
+
+    return {
+        "ref_url": f"/static/specs/{out_ref.name}",
+        "sec_url": f"/static/specs/{out_sec.name}",
+        "width": int(w),
+        "height": int(h),
+        "ref_audio_url": f"/uploads/{ref_path.name}",
+        "sec_audio_url": f"/uploads/{sec_path.name}",
+    }
+
+
+@app.route("/overlay", methods=["GET"])
+def overlay_index():
+    return render_template("overlay.html")
+
+@app.route("/overlay/upload", methods=["POST"])
+def overlay_upload():
+    # Expect fields: ref_file, sec_file, ref_color, sec_color (hex)
+    ref = request.files.get("ref_file")
+    sec = request.files.get("sec_file")
+    if not ref or not ref.filename:
+        return jsonify({"error": "Reference file missing"}), 400
+    if not sec or not sec.filename:
+        return jsonify({"error": "Secondary file missing"}), 400
+
+    ref_name = secure_filename(ref.filename)
+    sec_name = secure_filename(sec.filename)
+    if not _allowed(ref_name) or not _allowed(sec_name):
+        return jsonify({"error": "Unsupported file type"}), 400
+
+    # colors (fallback to defaults if missing)
+    ref_color = request.form.get("ref_color", "#00ff88").strip() or "#00ff88"
+    sec_color = request.form.get("sec_color", "#ff4dd2").strip() or "#ff4dd2"
+
+    ref_path = UPLOAD_DIR / ref_name
+    sec_path = UPLOAD_DIR / sec_name
+    ref.save(ref_path)
+    sec.save(sec_path)
+
+    try:
+        payload = _process_overlay_pair(ref_path, sec_path, ref_color, sec_color)
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ===============================
 # Entrypoint
 # ===============================
 if __name__ == "__main__":
     app.run(debug=True)
-
-"""
-@echo off
-cd /d "%~dp0"
-start "" cmd /k python app.py
-start "" http://localhost:5000/
-
-"""

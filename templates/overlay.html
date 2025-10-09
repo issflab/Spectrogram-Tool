@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Spectrogram Overlay</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/modern-normalize/2.0.0/modern-normalize.min.css"/>
+  <style>
+    :root { --bg:#0b0f14; --card:#121821; --ink:#e6f0ff; --muted:#9fb3c8; --panel:#0e141c; --border:#243149; --accent:#00ff88; }
+    body { background:var(--bg); color:var(--ink); font:14px/1.45 system-ui,Segoe UI,Roboto,Helvetica,Arial; }
+    header { display:flex; gap:12px; align-items:center; padding:14px 18px; background:var(--card); position:sticky; top:0; z-index:10; }
+    header a { color:var(--muted); text-decoration:none; } header a:hover { text-decoration:underline; } header strong { color:var(--ink); }
+
+    .controls { display:grid; grid-template-columns: repeat(12, 1fr); gap:12px; padding:14px 18px; background:var(--card); }
+    .controls > div { background:var(--panel); padding:12px; border-radius:12px; border:1px solid var(--border); }
+    .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .stack { display:flex; gap:8px; flex-wrap:wrap; }
+
+    input[type="file"] { inline-size: 100%; }
+    input[type="range"] { width: 180px; }
+    input[type="color"] { background:var(--panel); border:1px solid var(--border); border-radius:8px; height:32px; width:48px; cursor:pointer; }
+    select, button { background:#1b2636; color:var(--ink); border:1px solid var(--border); border-radius:10px; padding:8px 10px; cursor:pointer; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .badge { font-size:12px; opacity:.85; }
+
+    .stage-wrap { position:relative; margin:18px; height:72vh; border-radius:12px; background:var(--panel); border:1px solid var(--border); overflow:hidden; }
+    .stage { position:relative; width:100%; height:100%; }
+    .zoom { position:absolute; inset:0; transform-origin: 0 0; }
+    .layer { position:absolute; top:0; left:0; cursor:grab; image-rendering: pixelated; image-rendering: crisp-edges; }
+    .layer:active { cursor:grabbing; }
+    .hint { opacity:.75; font-size:12px; }
+
+    /* Loading overlay (like your other pages) */
+    .loading-overlay {
+      position: fixed; inset: 0; background: rgba(7,10,15,0.66);
+      display: none; align-items: center; justify-content: center; z-index: 1000;
+      backdrop-filter: blur(1.5px);
+    }
+    .loading-box {
+      background: #0f1722; border:1px solid var(--border); border-radius:14px;
+      padding:18px 22px; display:flex; align-items:center; gap:12px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
+    }
+    .spinner {
+      width: 26px; height: 26px; border:3px solid #243149; border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .nav { display:flex; align-items:center; gap:8px; margin-left:auto; }
+    .nav a { text-decoration:none; }
+    .btn.navlink {
+      background:#111827; border:1px solid #374151; color:#e6edf3;
+      padding:8px 12px; border-radius:10px; font-weight:600;
+    }
+    .btn.navlink.active { border-color:#6ae3ff; box-shadow:0 0 0 2px rgba(106,227,255,.15) inset; }
+    .brand { display:flex; align-items:center; gap:8px; }
+    .brand .tag { margin-left:4px; font-size:.85em; opacity:.8; }
+
+    .main { padding:16px; display:flex; flex-direction:column; gap:12px; }
+    .viewer-container { display:flex; gap:12px; min-height:60vh; }
+    .viewer-container.row { flex-direction:row; }
+    .viewer-container.column { flex-direction:column; }
+    .pane { flex:1; background:#0f172a; border:1px solid #1f2a44; border-radius:12px; padding:8px; display:flex; flex-direction:column; }
+    .pane-title { font-weight:600; opacity:0.9; margin-bottom:8px; }
+    .spec-canvas { width:100%; height:100%; flex:1; border-radius:8px; background:#000; }
+    .timeline { display:flex; align-items:center; gap:12px; }
+    input[type="range"] { width:100%; }
+    button, select { background:#111827; color:#e6edf3; border:1px solid #374151; padding:8px 10px; border-radius:8px; }
+    @media (max-width: 720px) { .readout { display:none; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <nav class="nav" aria-label="Primary">
+        <a class="btn navlink" href="/">Analyzer</a>
+        <a class="btn navlink" href="/compare">Spectrogram Comparator</a>
+        <a class="btn navlink" href="/overlay">Overlay</a>
+      </nav>
+  </header>
+
+  <form id="uploadForm" class="controls">
+    <div style="grid-column: span 4;">
+      <div class="row"><strong>Reference audio</strong></div>
+      <div class="row"><input type="file" id="refFile" name="ref_file" accept="audio/*" required /></div>
+      <div class="row">Color <input type="color" id="refColor" value="#00ff88"/></div>
+      <div class="row">Opacity <input type="range" id="refAlpha" min="0" max="100" value="85"/></div>
+      <div class="row stack">
+        <button type="button" id="refFront" title="Bring to front">Bring Front</button>
+        <button type="button" id="refBack" title="Send to back">Send Back</button>
+        <button type="button" id="refReset" title="Reset position">Reset Pos</button>
+      </div>
+      <div class="row"><span class="badge" id="refName">No file</span></div>
+    </div>
+
+    <div style="grid-column: span 4;">
+      <div class="row"><strong>Secondary audio</strong></div>
+      <div class="row"><input type="file" id="secFile" name="sec_file" accept="audio/*" required /></div>
+      <div class="row">Color <input type="color" id="secColor" value="#ff4dd2"/></div>
+      <div class="row">Opacity <input type="range" id="secAlpha" min="0" max="100" value="75"/></div>
+      <div class="row stack">
+        <button type="button" id="secFront" title="Bring to front">Bring Front</button>
+        <button type="button" id="secBack" title="Send to back">Send Back</button>
+        <button type="button" id="secReset" title="Reset position">Reset Pos</button>
+      </div>
+      <div class="row"><span class="badge" id="secName">No file</span></div>
+    </div>
+
+    <div style="grid-column: span 4;">
+      <div class="row"><strong>Zoom & Actions</strong></div>
+      <div class="row stack">
+        <button type="button" id="fit">Fit</button>
+        <button type="button" id="one">100%</button>
+        <button type="button" id="zoomOut">−</button>
+        <input type="range" id="zoomSlider" min="25" max="400" value="100" />
+        <button type="button" id="zoomIn">+</button>
+      </div>
+      <div class="row stack">
+        <button type="submit" id="go">Generate Spectrograms</button>
+        <button type="button" id="clear">Clear</button>
+      </div>
+      <div class="row">
+        Blend mode
+        <select id="blendMode">
+          <option value="source-over">Normal</option>
+          <option value="lighter">Add (lighter)</option>
+          <option value="multiply">Multiply</option>
+          <option value="screen">Screen</option>
+          <option value="overlay">Overlay</option>
+          <option value="difference">Difference</option>
+        </select>
+      </div>
+      <div class="row"><span class="hint">Tip: Hold <b>Space</b> and drag to pan the whole view. Drag a layer to align contours.</span></div>
+    </div>
+  </form>
+
+  <div class="stage-wrap" id="stageWrap">
+    <div id="stage" class="stage">
+      <div id="zoom" class="zoom">
+        <canvas id="layerRef" class="layer" width="0" height="0"></canvas>
+        <canvas id="layerSec" class="layer" width="0" height="0"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loading" class="loading-overlay" aria-live="polite" aria-busy="true">
+    <div class="loading-box">
+      <div class="spinner" aria-hidden="true"></div>
+      <div>Analyzing audio & generating spectrograms…</div>
+    </div>
+  </div>
+
+  <script>
+    const q = (s) => document.querySelector(s);
+    const stageWrap = q('#stageWrap');
+    const zoomNode  = q('#zoom');
+    const canvRef   = q('#layerRef');
+    const canvSec   = q('#layerSec');
+    const ctxRef    = canvRef.getContext('2d');
+    const ctxSec    = canvSec.getContext('2d');
+    const loadingEl = q('#loading');
+
+    let refImg = null, secImg = null; // true-colored spectrograms
+
+    const state = {
+      ref: { x:0, y:0, alpha:0.85, z:1, color:'#00ff88' },
+      sec: { x:0, y:0, alpha:0.75, z:2, color:'#ff4dd2' },
+      w: 0, h: 0,
+      blend: 'source-over',
+      zoom: { x:0, y:0, scale:1 },
+      spaceDown: false
+    };
+
+    // ----- Loading helpers -----
+    function setDisabled(disabled) {
+      ['refFile','secFile','refColor','secColor','refAlpha','secAlpha','blendMode','fit','one','zoomOut','zoomIn','zoomSlider','go','clear','refFront','refBack','refReset','secFront','secBack','secReset'].forEach(id=>{
+        const el = q('#'+id); if (el) el.disabled = disabled;
+      });
+    }
+    function showLoading(msg='Analyzing…') {
+      loadingEl.querySelector('.loading-box div:last-child').textContent = msg;
+      loadingEl.style.display = 'flex';
+      setDisabled(true);
+    }
+    function hideLoading() {
+      loadingEl.style.display = 'none';
+      setDisabled(false);
+    }
+
+    // ---------- Drawing ----------
+    function redraw() {
+      if (!refImg || !secImg) return;
+      [canvRef, canvSec].forEach(c => { c.width = state.w; c.height = state.h; });
+
+      ctxRef.clearRect(0,0,state.w,state.h);
+      ctxSec.clearRect(0,0,state.w,state.h);
+
+      // Ref
+      ctxRef.globalAlpha = state.ref.alpha;
+      ctxRef.globalCompositeOperation = state.blend;
+      ctxRef.drawImage(refImg, 0, 0);
+      ctxRef.globalAlpha = 1.0; ctxRef.globalCompositeOperation = 'source-over';
+
+      // Sec
+      ctxSec.globalAlpha = state.sec.alpha;
+      ctxSec.globalCompositeOperation = state.blend;
+      ctxSec.drawImage(secImg, 0, 0);
+      ctxSec.globalAlpha = 1.0; ctxSec.globalCompositeOperation = 'source-over';
+
+      // Layer positioning
+      canvRef.style.transform = `translate(${state.ref.x}px, ${state.ref.y}px)`;
+      canvSec.style.transform = `translate(${state.sec.x}px, ${state.sec.y}px)`;
+
+      // z-order
+      canvRef.style.zIndex = state.ref.z;
+      canvSec.style.zIndex = state.sec.z;
+
+      // World zoom/pan
+      zoomNode.style.transform = `translate(${state.zoom.x}px, ${state.zoom.y}px) scale(${state.zoom.scale})`;
+      zoomNode.style.transformOrigin = '0 0';
+    }
+
+    // ---------- Drag each layer ----------
+    function makeDraggable(canvas, key) {
+      let dragging = false; let sx=0, sy=0; let ox=0, oy=0;
+      canvas.addEventListener('pointerdown', (e)=>{
+        if (state.spaceDown) return; // space = pan mode
+        dragging = true; canvas.setPointerCapture(e.pointerId);
+        sx = e.clientX; sy = e.clientY; ox = state[key].x; oy = state[key].y;
+      });
+      canvas.addEventListener('pointermove', (e)=>{
+        if (!dragging) return;
+        state[key].x = ox + (e.clientX - sx) / state.zoom.scale;
+        state[key].y = oy + (e.clientY - sy) / state.zoom.scale;
+        redraw();
+      });
+      ['pointerup','pointercancel','lostpointercapture'].forEach(evt =>
+        canvas.addEventListener(evt, ()=> dragging = false)
+      );
+    }
+    makeDraggable(canvRef, 'ref');
+    makeDraggable(canvSec, 'sec');
+
+    // ---------- World pan (hold Space) ----------
+    (() => {
+      let panning = false; let sx=0, sy=0; let ox=0, oy=0;
+      window.addEventListener('keydown', e => { if (e.code === 'Space') { state.spaceDown = true; }});
+      window.addEventListener('keyup',   e => { if (e.code === 'Space') { state.spaceDown = false; }});
+      stageWrap.addEventListener('pointerdown', (e)=>{
+        if (!state.spaceDown) return;
+        panning = true; stageWrap.setPointerCapture(e.pointerId);
+        sx = e.clientX; sy = e.clientY; ox = state.zoom.x; oy = state.zoom.y;
+      });
+      stageWrap.addEventListener('pointermove', (e)=>{
+        if (!panning) return;
+        state.zoom.x = ox + (e.clientX - sx);
+        state.zoom.y = oy + (e.clientY - sy);
+        redraw();
+      });
+      ['pointerup','pointercancel','lostpointercapture'].forEach(evt =>
+        stageWrap.addEventListener(evt, ()=> panning = false)
+      );
+    })();
+
+    // ---------- Wheel zoom at cursor ----------
+    stageWrap.addEventListener('wheel', (e)=>{
+      if (!refImg || !secImg) return;
+      e.preventDefault();
+      const delta = Math.sign(e.deltaY);
+      const factor = (delta > 0) ? 0.9 : 1.1;
+      applyZoomAtPointer(factor, e.clientX, e.clientY);
+    }, { passive:false });
+
+    function applyZoomAtPointer(factor, clientX, clientY) {
+      const prev = state.zoom.scale;
+      let next = Math.min(8, Math.max(0.25, prev * factor));
+      const rect = stageWrap.getBoundingClientRect();
+      const px = (clientX - rect.left - state.zoom.x) / prev;
+      const py = (clientY - rect.top  - state.zoom.y) / prev;
+      state.zoom.x = clientX - rect.left - px * next;
+      state.zoom.y = clientY - rect.top  - py * next;
+      state.zoom.scale = next;
+      q('#zoomSlider').value = Math.round(next * 100);
+      redraw();
+    }
+
+    // ---------- Zoom UI ----------
+    function setZoomPercent(pct, fitToCenter=false) {
+      const rect = stageWrap.getBoundingClientRect();
+      const prev = state.zoom.scale;
+      const next = Math.min(800, Math.max(25, pct)) / 100;
+      if (fitToCenter) {
+        state.zoom.scale = next;
+        const vw = rect.width, vh = rect.height;
+        const cw = state.w * next, ch = state.h * next;
+        state.zoom.x = (vw - cw) / 2;
+        state.zoom.y = (vh - ch) / 2;
+      } else {
+        applyZoomAtPointer(next / prev, rect.left + rect.width/2, rect.top + rect.height/2);
+      }
+      q('#zoomSlider').value = Math.round(next * 100);
+      redraw();
+    }
+
+    q('#zoomSlider').addEventListener('input', e => setZoomPercent(+e.target.value));
+    q('#zoomIn').addEventListener('click',  ()=> setZoomPercent(+q('#zoomSlider').value + 10));
+    q('#zoomOut').addEventListener('click', ()=> setZoomPercent(+q('#zoomSlider').value - 10));
+    q('#one').addEventListener('click',     ()=> setZoomPercent(100, true));
+    q('#fit').addEventListener('click', ()=>{
+      if (!state.w || !state.h) return;
+      const rect = stageWrap.getBoundingClientRect();
+      const scaleW = rect.width  / state.w;
+      const scaleH = rect.height / state.h;
+      const pct = Math.floor(Math.max(10, Math.min(scaleW, scaleH) * 100));
+      setZoomPercent(pct, true);
+    });
+
+    // ---------- Opacity, blend, z-order ----------
+    q('#refAlpha').addEventListener('input', e=>{ state.ref.alpha = (+e.target.value)/100; redraw(); });
+    q('#secAlpha').addEventListener('input', e=>{ state.sec.alpha = (+e.target.value)/100; redraw(); });
+    q('#blendMode').addEventListener('change', e=>{ state.blend = e.target.value; redraw(); });
+
+    q('#refFront').addEventListener('click', ()=>{ state.ref.z = 2; state.sec.z = 1; redraw(); });
+    q('#refBack').addEventListener('click',  ()=>{ state.ref.z = 1; state.sec.z = 2; redraw(); });
+    q('#secFront').addEventListener('click', ()=>{ state.sec.z = 2; state.ref.z = 1; redraw(); });
+    q('#secBack').addEventListener('click',  ()=>{ state.sec.z = 1; state.ref.z = 2; redraw(); });
+
+    q('#refReset').addEventListener('click', ()=>{ state.ref.x=0; state.ref.y=0; redraw(); });
+    q('#secReset').addEventListener('click', ()=>{ state.sec.x=0; state.sec.y=0; redraw(); });
+
+    // ---------- Clear ----------
+    q('#clear').addEventListener('click', ()=>{
+      refImg = secImg = null; state.w = state.h = 0;
+      ctxRef.clearRect(0,0,canvRef.width, canvRef.height);
+      ctxSec.clearRect(0,0,canvSec.width, canvSec.height);
+      q('#refName').textContent = 'No file';
+      q('#secName').textContent = 'No file';
+      state.zoom = { x:0, y:0, scale:1 };
+      redraw();
+    });
+
+    // ---------- Upload (with server-rendered colors) ----------
+    q('#uploadForm').addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const refFile = q('#refFile').files[0];
+      const secFile = q('#secFile').files[0];
+      if (!refFile || !secFile) return;
+
+      const fd = new FormData();
+      fd.append('ref_file', refFile);
+      fd.append('sec_file', secFile);
+      fd.append('ref_color', q('#refColor').value);
+      fd.append('sec_color', q('#secColor').value);
+
+      q('#refName').textContent = refFile.name;
+      q('#secName').textContent = secFile.name;
+
+      try {
+        showLoading('Analyzing audio & generating spectrograms…');
+        const resp = await fetch('/overlay/upload', { method:'POST', body: fd });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Upload failed');
+
+        // load images (still show loading while PNGs decode)
+        const bust = `?t=${Date.now()}`;
+        const loadImg = (src) => new Promise((res, rej)=>{
+          const im = new Image();
+          im.onload = () => res(im);
+          im.onerror = rej;
+          im.src = src + bust;
+        });
+
+        const [ri, si] = await Promise.all([loadImg(data.ref_url), loadImg(data.sec_url)]);
+        refImg = ri; secImg = si;
+
+        state.w = data.width;
+        state.h = data.height;
+        state.ref.x = state.ref.y = 0;
+        state.sec.x = state.sec.y = 0;
+
+        // Auto-fit
+        const rect = stageWrap.getBoundingClientRect();
+        const scaleW = rect.width  / state.w;
+        const scaleH = rect.height / state.h;
+        const fitPct = Math.floor(Math.max(10, Math.min(scaleW, scaleH) * 100));
+        q('#zoomSlider').value = fitPct;
+        setZoomPercent(fitPct, true);
+      } catch (err) {
+        alert(err.message || 'Something went wrong.');
+      } finally {
+        hideLoading();
+      }
+    });
+  </script>
+</body>
+</html>
