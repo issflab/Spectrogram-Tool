@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Formant Analyzer Pro – Deepfake Classifier</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="/static/style.css" rel="stylesheet">
+  <style>
+    .nav { display:flex; align-items:center; gap:8px; margin-left:auto; }
+    .nav a { text-decoration:none; }
+    .btn.navlink {
+      background:#111827; border:1px solid #374151; color:#e6edf3;
+      padding:8px 12px; border-radius:10px; font-weight:600;
+    }
+    .btn.navlink.active {
+      border-color:#6ae3ff;
+      box-shadow:0 0 0 2px rgba(106,227,255,.15) inset;
+    }
+    .brand { display:flex; align-items:center; gap:8px; }
+    .brand .tag { margin-left:4px; font-size:.85em; opacity:.8; }
+    @media (max-width: 720px) {
+      .readout { display:none; }
+    }
+    .pred-label{
+      font-size:1.4rem;
+      font-weight:700;
+      margin:4px 0;
+    }
+    .pred-label.deepfake{ color:#ff6b81; }
+    .pred-label.original{ color:#6ae3ff; }
+    .prob-row{
+      display:flex; gap:10px; flex-wrap:wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size:.9rem;
+    }
+    .pill{
+      padding:4px 10px;
+      border-radius:999px;
+      border:1px solid var(--border);
+      background:#0c1420;
+    }
+    .pill span{ font-weight:600; }
+    .hint{
+      font-size:.85rem;
+      color:var(--muted);
+      margin-top:6px;
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Formant Analyzer <span class="tag">enhanced</span></div>
+    <div class="readout">
+      <span>Deepfake Classifier</span>
+    </div>
+
+    <!-- Shared menu -->
+    <nav class="nav" aria-label="Primary">
+      <a class="btn navlink" href="/">Analyzer</a>
+      <a class="btn navlink" href="/compare">Spectrogram Comparator</a>
+      <a class="btn navlink" href="/overlay">Overlay</a>
+      <a class="btn navlink" href="/deepfake">Deepfake Classifier</a>
+    </nav>
+  </header>
+
+  <main class="layout" id="mainLayout" aria-busy="false" aria-live="polite">
+    <aside class="controls">
+      <div class="card">
+        <h3>1) Upload Audio</h3>
+        <form id="dfUploadForm">
+          <input type="file" id="dfFileInput"
+                 accept=".wav,.flac,.mp3,.m4a,.ogg,.aac" required>
+
+          <div class="row">
+            <label>Notes</label>
+            <span class="hint">
+              Audio is converted to a spectrogram and classified using a ResNet-18 model
+              trained on spectrogram images.
+            </span>
+          </div>
+
+          <button type="submit" id="dfAnalyzeBtn" class="btn primary">
+            Analyze Deepfake
+          </button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3>Audio Preview</h3>
+        <audio id="dfPlayer" controls preload="auto"></audio>
+        <div class="hint">
+          After upload, the original audio will appear here for listening.
+        </div>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <div class="card">
+        <h3>2) Classification Result</h3>
+        <div id="dfResult">
+          <p class="hint">Upload an audio file on the left to see the prediction.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>How it works</h3>
+        <p class="hint">
+          This page uses the same backend model as your research pipeline:
+          the audio is decoded (WAV/FLAC/MP3/M4A/OGG/AAC), converted into a
+          log-magnitude STFT spectrogram (magma colormap), resized to 224×224,
+          and passed through a ResNet-18 classifier that outputs
+          <em>Original</em> vs <em>Deepfake</em> probabilities.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Loader Overlay -->
+  <div id="loaderOverlay" class="loader hidden" role="status"
+       aria-live="assertive" aria-label="Analyzing…">
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="loader-text">Analyzing…</div>
+  </div>
+
+  <footer class="foot">
+    <small>Deepfake classifier • Spectrogram-based ResNet-18 head.</small>
+  </footer>
+
+  <script>
+    // Highlight active menu item
+    (function() {
+      const path = location.pathname || "/";
+      document.querySelectorAll('.nav .navlink').forEach(a => {
+        if ((a.getAttribute('href') === "/" && path === "/") ||
+            (a.getAttribute('href') !== "/" && path.startsWith(a.getAttribute('href')))) {
+          a.classList.add('active');
+        }
+      });
+    })();
+
+    const loader = document.getElementById('loaderOverlay');
+    function showLoader(on) {
+      if (on) loader.classList.remove('hidden');
+      else loader.classList.add('hidden');
+    }
+
+    const form = document.getElementById('dfUploadForm');
+    const fileInput = document.getElementById('dfFileInput');
+    const resultDiv = document.getElementById('dfResult');
+    const player = document.getElementById('dfPlayer');
+    const analyzeBtn = document.getElementById('dfAnalyzeBtn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!fileInput.files.length) return;
+
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+
+      analyzeBtn.disabled = true;
+      showLoader(true);
+      resultDiv.innerHTML = '<p class="hint">Analyzing…</p>';
+
+      try {
+        const resp = await fetch('/deepfake/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          resultDiv.innerHTML =
+            '<p class="hint">Error: ' + (data.error || 'Unknown error') + '</p>';
+        } else {
+          const isDeepfake = data.prediction === 'Deepfake';
+          const labelClass = isDeepfake ? 'deepfake' : 'original';
+
+          resultDiv.innerHTML = `
+            <p>File: <code>${data.filename}</code></p>
+            <p class="pred-label ${labelClass}">${data.prediction}</p>
+            <div class="prob-row">
+              <div class="pill">Original: <span>${data.prob_original.toFixed(3)}</span></div>
+              <div class="pill">Deepfake: <span>${data.prob_deepfake.toFixed(3)}</span></div>
+            </div>
+          `;
+
+          if (data.audio_url) {
+            player.src = data.audio_url;
+            player.load();
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        resultDiv.innerHTML =
+          '<p class="hint">Error: ' + (err.message || 'Request failed') + '</p>';
+      } finally {
+        analyzeBtn.disabled = false;
+        showLoader(false);
+      }
+    });
+  </script>
+</body>
+</html>

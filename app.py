@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 import librosa
 import cv2
+import torch
+from torchvision import models, transforms
+from PIL import Image
+import matplotlib.pyplot as plt
+import io
 
 from flask import (
     Flask, request, render_template, send_file, jsonify, send_from_directory
@@ -32,6 +37,35 @@ UPLOAD_DIR = ROOT / "uploads"
 SPEC_DIR = ROOT / "static" / "specs"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SPEC_DIR.mkdir(parents=True, exist_ok=True)
+
+# ===================================================================
+# Deepfake Classifier: ResNet18 on Spectrogram Images
+# ===================================================================
+
+MODEL_PATH = Path(r"CrossLingualSpeechAuthenticityNetwork.pth")  # TODO: update to your actual model path
+
+IMN_MEAN = [0.485, 0.456, 0.406]
+IMN_STD  = [0.229, 0.224, 0.225]
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load model once at startup
+deepfake_model = models.resnet18(weights=None)
+deepfake_model.fc = torch.nn.Sequential(
+    torch.nn.Dropout(0.3),
+    torch.nn.Linear(deepfake_model.fc.in_features, 2),
+)
+
+state = torch.load(MODEL_PATH, map_location=device)
+deepfake_model.load_state_dict(state)
+deepfake_model.to(device)
+deepfake_model.eval()
+
+deepfake_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(IMN_MEAN, IMN_STD),
+])
 
 # restrict uploads
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
@@ -112,6 +146,94 @@ def _ml_mask_from_Sdb(S_db, open_k=3, close_k=5):
 def index():
     return render_template("index.html")
 
+def _wav_to_spectrogram_image(audio_path: Path, dpi: int = 300) -> Image.Image:
+    """
+    Load a WAV (or other supported format), compute log-STFT spectrogram,
+    and return it as a RGB PIL image, in the same style you used for training.
+    """
+    # Load audio (keep native sr)
+    samples, sr = librosa.load(str(audio_path), sr=None, mono=True)
+
+    # STFT -> magnitude
+    S = np.abs(librosa.stft(samples, n_fft=1024, hop_length=512))
+    S_db = librosa.amplitude_to_db(S, ref=np.max)
+
+    # Plot spectrogram to an in-memory PNG
+    fig = plt.figure(figsize=(10, 5), dpi=dpi)
+    librosa.display.specshow(
+        S_db,
+        sr=sr,
+        hop_length=512,
+        x_axis="time",
+        y_axis="log",
+        cmap="magma",  # same as your spectrogram_generator.py
+    )
+    plt.axis("off")
+
+    buf = io.BytesIO()
+    plt.savefig(buf, bbox_inches="tight", pad_inches=0, format="png")
+    plt.close(fig)
+    buf.seek(0)
+
+    img = Image.open(buf).convert("RGB")
+    return img
+def _predict_deepfake(audio_path: Path) -> dict:
+    """
+    End-to-end prediction on a single audio file.
+    Returns a dict with label and raw logits.
+    """
+    img = _wav_to_spectrogram_image(audio_path)
+    tensor = deepfake_transform(img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        logits = deepfake_model(tensor)
+        probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        pred_idx = int(np.argmax(probs))
+
+    label = "Original" if pred_idx == 1 else "Deepfake"
+    return {
+        "label": label,
+        "prob_original": float(probs[1]),
+        "prob_deepfake": float(probs[0]),
+    }
+# ===============================
+# Deepfake Classifier Page
+# ===============================
+@app.route("/deepfake", methods=["GET"])
+def deepfake_index():
+    # create templates/deepfake.html for a simple upload UI
+    return render_template("deepfake.html")
+@app.route("/deepfake/upload", methods=["POST"])
+def deepfake_upload():
+    """
+    Accept an audio file, save it, run the ResNet18 spectro classifier,
+    and return JSON with prediction + probabilities.
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "No file"}), 400
+
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    filename = secure_filename(f.filename)
+    if not _allowed(filename):
+        return jsonify({"error": "Unsupported file type"}), 400
+
+    save_path = UPLOAD_DIR / filename
+    f.save(save_path)
+
+    try:
+        res = _predict_deepfake(save_path)
+        return jsonify({
+            "filename": filename,
+            "prediction": res["label"],
+            "prob_original": res["prob_original"],
+            "prob_deepfake": res["prob_deepfake"],
+            "audio_url": f"/uploads/{filename}",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ===============================
 # Analyzer API (supports clean_mode)
